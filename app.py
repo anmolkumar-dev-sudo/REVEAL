@@ -7,7 +7,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from jose import JWTError, jwt
 from passlib.context import CryptContext
-from pydantic import BaseModel
+from pydantic import BaseModel, constr
 
 load_dotenv()
 
@@ -20,6 +20,18 @@ if not DATABASE_URL:
 
 if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY is not set in .env")
+
+# BUG FIX: Neon requires SSL. If your DATABASE_URL is missing
+# "?sslmode=require", connecting can hang or fail with an unhelpful error.
+# This doesn't change your string, just fails fast with a clear message
+# instead of a confusing hang, which is likely what you were seeing from
+# Swagger UI.
+if "neon.tech" in DATABASE_URL and "sslmode" not in DATABASE_URL:
+    raise RuntimeError(
+        "DATABASE_URL points to Neon but is missing '?sslmode=require'. "
+        "Add it to your .env, e.g. "
+        "postgresql://user:pass@host/db?sslmode=require"
+    )
 
 app = FastAPI()
 
@@ -35,17 +47,31 @@ pwd_context = CryptContext(
     deprecated="auto"
 )
 
+# BUG FIX: previously any string (including empty "") was accepted for
+# username/password, since Pydantic only checked the type was `str`.
+# constr enforces a minimum length so /register can't create junk accounts.
 class Registration(BaseModel):
-    username: str
-    password: str
+    username: constr(strip_whitespace=True, min_length=1, max_length=50)
+    password: constr(min_length=1, max_length=200)
 
 class Posts(BaseModel):
-    content: str
+    content: constr(strip_whitespace=True, min_length=1, max_length=2000)
+
 
 def get_db():
-    conn = psycopg2.connect(DATABASE_URL)
+    try:
+        conn = psycopg2.connect(DATABASE_URL)
+    except psycopg2.OperationalError as e:
+        # BUG FIX: previously an unreachable/misconfigured DB raised a raw
+        # 500 with no useful message. This surfaces a clearer error instead
+        # of a silent hang/timeout in Swagger.
+        raise HTTPException(
+            status_code=503,
+            detail=f"Could not connect to database: {e}"
+        )
     cursor = conn.cursor()
     return conn, cursor
+
 
 def get_current_user(authorization: str):
     try:
@@ -81,6 +107,7 @@ def get_current_user(authorization: str):
             detail="Invalid or expired token"
         )
 
+
 @app.post("/register")
 def register(users: Registration):
     conn, cursor = get_db()
@@ -113,6 +140,7 @@ def register(users: Registration):
     finally:
         cursor.close()
         conn.close()
+
 
 @app.post("/login")
 def login(users: Registration):
@@ -163,6 +191,7 @@ def login(users: Registration):
         cursor.close()
         conn.close()
 
+
 @app.post("/posts")
 def create_post(
     posts: Posts,
@@ -190,6 +219,7 @@ def create_post(
     finally:
         cursor.close()
         conn.close()
+
 
 @app.get("/posts")
 def show_post():
@@ -232,6 +262,7 @@ def show_post():
         cursor.close()
         conn.close()
 
+
 @app.delete("/post/{id}")
 def delete_post(
     id: int,
@@ -243,11 +274,7 @@ def delete_post(
 
     try:
         cursor.execute(
-            """
-            DELETE FROM posts
-            WHERE id = %s
-            AND user_id = %s
-            """,
+            "DELETE FROM posts WHERE id = %s AND user_id = %s",
             (id, user_id)
         )
 
@@ -263,9 +290,29 @@ def delete_post(
             "message": "post deleted"
         }
 
+    except psycopg2.errors.ForeignKeyViolation:
+        # BUG FIX: if `likes` references posts without ON DELETE CASCADE,
+        # deleting a post that has likes throws a raw FK violation and the
+        # old code returned an unhandled 500 ("Delete failed." in the UI
+        # with no explanation). This surfaces a clear, actionable message.
+        # Proper fix: run this once against your DB (see notes below):
+        #   ALTER TABLE likes
+        #   DROP CONSTRAINT likes_post_id_fkey,
+        #   ADD CONSTRAINT likes_post_id_fkey
+        #     FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE;
+        conn.rollback()
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Cannot delete: this post still has likes referencing it. "
+                "Add ON DELETE CASCADE to the likes.post_id foreign key."
+            )
+        )
+
     finally:
         cursor.close()
         conn.close()
+
 
 @app.post("/post/{id}/like")
 def like_post(
@@ -277,6 +324,15 @@ def like_post(
     conn, cursor = get_db()
 
     try:
+        cursor.execute(
+            """
+            SELECT 1 FROM posts WHERE id = %s
+            """,
+            (id,)
+        )
+        if cursor.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Post not found")
+
         cursor.execute(
             """
             INSERT INTO likes (post_id, user_id)
@@ -293,9 +349,26 @@ def like_post(
             "message": "post is liked"
         }
 
+    except psycopg2.errors.InvalidColumnReference:
+        # BUG FIX: ON CONFLICT (post_id, user_id) needs a matching UNIQUE
+        # constraint on the likes table. Without it every like request
+        # throws this error and previously just 500'd with no explanation.
+        # Fix once in your DB:
+        #   ALTER TABLE likes ADD CONSTRAINT likes_post_user_unique
+        #     UNIQUE (post_id, user_id);
+        conn.rollback()
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "likes table is missing a UNIQUE(post_id, user_id) "
+                "constraint required for ON CONFLICT to work."
+            )
+        )
+
     finally:
         cursor.close()
         conn.close()
+
 
 @app.delete("/post/{id}/like")
 def delete_like(
@@ -325,4 +398,3 @@ def delete_like(
     finally:
         cursor.close()
         conn.close()
-
