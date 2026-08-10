@@ -1,16 +1,27 @@
-from fastapi import FastAPI,Header
-from jose import jwt
-from fastapi import HTTPException
-from datetime import datetime, timedelta
-from jose import ExpiredSignatureError
-from passlib.context import CryptContext
-from sqlalchemy import create_engine
-from pydantic import BaseModel
+import os
+from datetime import datetime, timedelta, timezone
+
 import psycopg2
-
+from dotenv import load_dotenv
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from pydantic import BaseModel
 
-app=FastAPI()
+load_dotenv()
+
+SECRET_KEY = os.getenv("SECRET_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+ALGORITHM = os.getenv("ALGORITHM", "HS256")
+
+if not DATABASE_URL:
+    raise RuntimeError("DATABASE_URL is not set in .env")
+
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY is not set in .env")
+
+app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
@@ -18,187 +29,300 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 pwd_context = CryptContext(
     schemes=["bcrypt"],
     deprecated="auto"
 )
 
-class registration(BaseModel):
-    username:str
-    password:str
+class Registration(BaseModel):
+    username: str
+    password: str
 
 class Posts(BaseModel):
-    content:str
-
-import os
-import psycopg2
-
-SECRET_KEY = os.getenv("SECRET_KEY")
-
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-engine=create_engine(DATABASE_URL)
+    content: str
 
 def get_db():
     conn = psycopg2.connect(DATABASE_URL)
     cursor = conn.cursor()
     return conn, cursor
 
-@app.post("/register")
-def register(users:registration):
-    conn,cursor=get_db()
-    hashed_password=pwd_context.hash(users.password)
+def get_current_user(authorization: str):
     try:
-        cursor.execute(
-            """insert into users (username,password)
-               values (%s,%s)""",
-               (users.username,hashed_password)
+        parts = authorization.split(" ")
+
+        if len(parts) != 2 or parts[0].lower() != "bearer":
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid authorization header"
+            )
+
+        token = parts[1]
+
+        payload = jwt.decode(
+            token,
+            SECRET_KEY,
+            algorithms=[ALGORITHM]
         )
+
+        user_id = payload.get("user_id")
+
+        if user_id is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid token"
+            )
+
+        return user_id
+
+    except JWTError:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid or expired token"
+        )
+
+@app.post("/register")
+def register(users: Registration):
+    conn, cursor = get_db()
+
+    try:
+        hashed_password = pwd_context.hash(users.password)
+
+        cursor.execute(
+            """
+            INSERT INTO users (username, password)
+            VALUES (%s, %s)
+            """,
+            (users.username, hashed_password)
+        )
+
         conn.commit()
+
+        return {
+            "message": "user registered :)"
+        }
+
+    except psycopg2.IntegrityError:
+        conn.rollback()
+
+        raise HTTPException(
+            status_code=400,
+            detail="Username already taken"
+        )
+
+    finally:
         cursor.close()
         conn.close()
-        return {"message":"user registered :)"}
-    except:
-        conn.rollback()
-        raise HTTPException(status_code=400,detail="Username already taken")
 
 @app.post("/login")
-def login(users:registration):
-    conn,cursor=get_db()
-    cursor.execute(
-        """select id,username,password
-           from users
-           where username=%s""",
-           (users.username,)
-    )
-    db_user=cursor.fetchone()
-    if db_user is None:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid Credentials"
-        )
-    if not pwd_context.verify(users.password,db_user[2]):
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid Credentials"
-        )
-    token=jwt.encode(
-        {
-            "user_id":db_user[0],
-            "username":db_user[1],
-            "exp":datetime.utcnow() + timedelta(days=2)
-        },
-        SECRET_KEY,
-        algorithm="HS256",
-    )
-    cursor.close()
-    conn.close()
-    return {"token":token}
-       
-@app.post("/posts")
-def create_post(posts:Posts,authorization:str=Header()):
-    conn,cursor=get_db()
-    token=authorization.split(" ")[1]
-    payload=jwt.decode(
-        token,
-        SECRET_KEY,
-        algorithms=["HS256"]
-    )
-    user_id=payload["user_id"]
+def login(users: Registration):
+    conn, cursor = get_db()
 
-    cursor.execute(
-        """insert into posts(content,user_id)
-            values (%s,%s)""",
-            (posts.content,user_id)
-    )
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return {"message":"post created"}
-    
+    try:
+        cursor.execute(
+            """
+            SELECT id, username, password
+            FROM users
+            WHERE username = %s
+            """,
+            (users.username,)
+        )
+
+        db_user = cursor.fetchone()
+
+        if db_user is None:
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid Credentials"
+            )
+
+        if not pwd_context.verify(
+            users.password,
+            db_user[2]
+        ):
+            raise HTTPException(
+                status_code=401,
+                detail="Invalid Credentials"
+            )
+
+        token = jwt.encode(
+            {
+                "user_id": db_user[0],
+                "username": db_user[1],
+                "exp": datetime.now(timezone.utc) + timedelta(days=1)
+            },
+            SECRET_KEY,
+            algorithm=ALGORITHM
+        )
+
+        return {
+            "token": token
+        }
+
+    finally:
+        cursor.close()
+        conn.close()
+
+@app.post("/posts")
+def create_post(
+    posts: Posts,
+    authorization: str = Header(...)
+):
+    user_id = get_current_user(authorization)
+
+    conn, cursor = get_db()
+
+    try:
+        cursor.execute(
+            """
+            INSERT INTO posts (content, user_id)
+            VALUES (%s, %s)
+            """,
+            (posts.content, user_id)
+        )
+
+        conn.commit()
+
+        return {
+            "message": "post created"
+        }
+
+    finally:
+        cursor.close()
+        conn.close()
 
 @app.get("/posts")
 def show_post():
-    conn,cursor=get_db()
-    cursor.execute(
-        """SELECT posts.id, posts.content, users.username, COUNT(likes.user_id) AS like_count
-           FROM posts
-           JOIN users ON posts.user_id = users.id
-           LEFT JOIN likes ON posts.id = likes.post_id
-           GROUP BY posts.id, posts.content, users.username"""
-    )
-    show = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return [{"id": r[0], "content": r[1], "likes": r[3]} for r in show]
+    conn, cursor = get_db()
 
+    try:
+        cursor.execute(
+            """
+            SELECT
+                posts.id,
+                posts.content,
+                users.username,
+                COUNT(likes.user_id) AS like_count
+            FROM posts
+            JOIN users
+                ON posts.user_id = users.id
+            LEFT JOIN likes
+                ON posts.id = likes.post_id
+            GROUP BY
+                posts.id,
+                posts.content,
+                users.username
+            ORDER BY posts.id DESC
+            """
+        )
+
+        show = cursor.fetchall()
+
+        return [
+            {
+                "id": row[0],
+                "content": row[1],
+                "username": row[2],
+                "likes": row[3]
+            }
+            for row in show
+        ]
+
+    finally:
+        cursor.close()
+        conn.close()
 
 @app.delete("/post/{id}")
-def delete(id:int,authorization:str=Header()):
-    conn,cursor=get_db()
-    
-    token=authorization.split(" ")[1]
-    payload=jwt.decode(
-        token,
-        SECRET_KEY,
-        algorithms=["HS256"]
-    )
-    user_id=payload["user_id"]
+def delete_post(
+    id: int,
+    authorization: str = Header(...)
+):
+    user_id = get_current_user(authorization)
 
-    cursor.execute(
-        """DELETE FROM posts
-            WHERE id=%s
-            AND user_id=%s""",
-            (id,user_id)
-    )
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return {"message":"post deleted"}
+    conn, cursor = get_db()
+
+    try:
+        cursor.execute(
+            """
+            DELETE FROM posts
+            WHERE id = %s
+            AND user_id = %s
+            """,
+            (id, user_id)
+        )
+
+        conn.commit()
+
+        if cursor.rowcount == 0:
+            raise HTTPException(
+                status_code=404,
+                detail="Post not found or you are not the owner"
+            )
+
+        return {
+            "message": "post deleted"
+        }
+
+    finally:
+        cursor.close()
+        conn.close()
 
 @app.post("/post/{id}/like")
-def like(id:int,authorization : str=Header()):
-    conn,cursor=get_db()
-    token=authorization.split(" ")[1]
-    payload=jwt.decode(
-        token,
-        SECRET_KEY,
-        algorithms=["HS256"]
-    )
-    user_id=payload["user_id"]
+def like_post(
+    id: int,
+    authorization: str = Header(...)
+):
+    user_id = get_current_user(authorization)
 
-    cursor.execute(
-    """
-    INSERT INTO likes(post_id,user_id)
-    VALUES(%s,%s)
-    ON CONFLICT (post_id,user_id)
-    DO NOTHING
-    """,
-    (id, user_id)
-)
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return {"message":"post is liked"}
+    conn, cursor = get_db()
+
+    try:
+        cursor.execute(
+            """
+            INSERT INTO likes (post_id, user_id)
+            VALUES (%s, %s)
+            ON CONFLICT (post_id, user_id)
+            DO NOTHING
+            """,
+            (id, user_id)
+        )
+
+        conn.commit()
+
+        return {
+            "message": "post is liked"
+        }
+
+    finally:
+        cursor.close()
+        conn.close()
 
 @app.delete("/post/{id}/like")
-def del_like(id:int,authorization : str=Header()):
-    conn,cursor=get_db()
-    token=authorization.split(" ")[1]
-    payload=jwt.decode(
-        token,
-        SECRET_KEY,
-        algorithms=["HS256"]
-    )
-    user_id=payload["user_id"]
+def delete_like(
+    id: int,
+    authorization: str = Header(...)
+):
+    user_id = get_current_user(authorization)
 
-    cursor.execute(
-        """delete from likes
-            where post_id=%s
-            and user_id=%s""",
-        (id,user_id)
-    )
-    conn.commit()
-    cursor.close()
-    conn.close()
-    return {"message":"post like is deleted"}
+    conn, cursor = get_db()
+
+    try:
+        cursor.execute(
+            """
+            DELETE FROM likes
+            WHERE post_id = %s
+            AND user_id = %s
+            """,
+            (id, user_id)
+        )
+
+        conn.commit()
+
+        return {
+            "message": "post like is deleted"
+        }
+
+    finally:
+        cursor.close()
+        conn.close()
+
