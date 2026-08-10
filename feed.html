@@ -255,7 +255,7 @@ async function loadFeed(){
 function makeCard(p,i){
   const content=p.content||"";
   const id=p.id||i;
-  const author="anonymous";
+  const author=p.username||"anonymous";
   const likeCount=p.likes||0;                      // ← like count from backend
   const isLiked=!!liked[id];
   const isMine=me&&(author===me.username);
