@@ -1,3 +1,29 @@
+has been set up for using Node.js 24.18.0 (x64) and npm.
+
+C:\Users\ASUS>curl https://reveal-1-4wvr.onrender.com/posts
+Not Found
+
+C:\Users\ASUS>curl https://reveal-1-4wvr.onrender.com/
+Not Found
+
+C:\Users\ASUS>
+
+C:\Users\ASUS>curl https://reveal-1-4wvr.onrender.com/openapi.json
+Not Found
+
+C:\Users\ASUS>curl https://reveal-1-4wvr.onrender.com/docs
+Not Found
+
+C:\Users\ASUS>curl http://127.0.0.1:8000/posts
+curl: (7) Failed to connect to 127.0.0.1:8000 after 2026 ms: Could not connect to server
+
+C:\Users\ASUS>curl http://127.0.0.1:8000/posts
+[]
+C:\Users\ASUS>curl -X POST "https://reveal-1-4vvr.onrender.com/posts" -H "accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer YOUR_JWT_TOKEN" -d "{\"content\":\"hi everyone.\"}"
+{"detail":"Invalid or expired token"}
+C:\Users\ASUS>curl -X POST "https://reveal-1-4vvr.onrender.com/posts" -H "accept: application/json" -H "Content-Type: application/json" -H "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoxLCJ1c2VybmFtZSI6ImFubW9sIiwiZXhwIjoxNzg2NTI3ODMyfQ.eyKE29_tNe3v_MAhcWnMlkck8P9G7z2wzTuxoVGPce0" -d "{\"content\":\"hi everyone.\"}"
+{"message":"post created"}
+C:\Users\ASUS>curl http://127.0.0.1:8000/
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -151,3 +177,35 @@ document.addEventListener("keydown",e=>{if(e.key==="Enter")submit();});
 </script>
 </body>
 </html>
+
+C:\Users\ASUS>curl https://reveal-1-4vvr.onrender.com/docs
+
+    <!DOCTYPE html>
+    <html>
+    <head>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link type="text/css" rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css">
+    <link rel="shortcut icon" href="https://fastapi.tiangolo.com/img/favicon.png">
+    <title>FastAPI - Swagger UI</title>
+    </head>
+    <body>
+    <div id="swagger-ui">
+    </div>
+    <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
+    <!-- `SwaggerUIBundle` is now available on the page -->
+    <script>
+    const ui = SwaggerUIBundle({
+        url: '/openapi.json',
+    "dom_id": "#swagger-ui",
+"layout": "BaseLayout",
+"deepLinking": true,
+"showExtensions": true,
+"showCommonExtensions": true,
+oauth2RedirectUrl: window.location.origin + '/docs/oauth2-redirect',
+    presets: [
+        SwaggerUIBundle.presets.apis,
+        SwaggerUIBundle.SwaggerUIStandalonePreset
+        ],
+    })
+    </script>
+    </body>
